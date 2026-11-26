@@ -340,6 +340,7 @@
         <span class="font-bold text-xs sm:text-sm text-slate-900 truncate">Practice Mode</span>
         <span class="hidden md:inline text-xs text-slate-500 truncate">• SAT Reading & Writing</span>
         <span id="supabaseSyncStatus" class="hidden lg:inline-flex items-center gap-1.5 text-[11px] text-slate-500 truncate" aria-live="polite"><span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span> Connecting to Supabase...</span>
+        <button id="accountSyncBtn" type="button" class="px-2.5 py-1 rounded-full border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-semibold text-slate-700 whitespace-nowrap">Link account</button>
       </div>
 
       <!-- Center: Question Navigator Trigger -->
@@ -483,6 +484,34 @@
     </div>
   </div>
 
+  <div id="accountModal" class="hidden fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/50 p-4">
+    <section class="w-full max-w-lg rounded-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="accountModalTitle">
+      <header class="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-5 py-4">
+        <div>
+          <h2 id="accountModalTitle" class="font-bold text-slate-900">Use your progress on another device</h2>
+          <p class="mt-1 text-xs text-slate-500">Link this browser's temporary account, then sign in with the same email and password elsewhere.</p>
+        </div>
+         <button id="closeAccountModalBtn" type="button" class="rounded-lg px-2 py-1 text-slate-500 hover:bg-slate-200" aria-label="Close">×</button>
+      </header>
+      <div class="space-y-3 p-5">
+        <div>
+          <label for="accountEmailInput" class="mb-1 block text-xs font-semibold text-slate-700">Email</label>
+          <input id="accountEmailInput" type="email" autocomplete="email" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100" placeholder="you@example.com">
+        </div>
+        <div>
+          <label for="accountPasswordInput" class="mb-1 block text-xs font-semibold text-slate-700">Password</label>
+          <input id="accountPasswordInput" type="password" autocomplete="new-password" minlength="8" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100" placeholder="Use at least 8 characters">
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button id="linkAccountBtn" type="button" class="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700">Send verification email</button>
+          <button id="setAccountPasswordBtn" type="button" class="hidden rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700">Set password</button>
+          <button id="signInAccountBtn" type="button" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">Sign in</button>
+        </div>
+        <p id="accountStatus" class="rounded-lg bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-600" aria-live="polite">Linking keeps this account's existing question progress.</p>
+      </div>
+    </section>
+  </div>
+
   <!-- APPLICATION LOGIC & AUTHENTIC SAT DATASET -->
   <script>
     /**
@@ -553,12 +582,26 @@
     state.questions.forEach(q => initQuestionProgress(q.id));
 
     let supabaseUserId = null;
+    let currentSupabaseUser = null;
     const pendingProgressSaves = new Map();
     const supabaseClient = window.supabase?.createClient && window.SAT_SUPABASE_CONFIG
       ? window.supabase.createClient(window.SAT_SUPABASE_CONFIG.url, window.SAT_SUPABASE_CONFIG.publishableKey, {
-          auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false }
+          auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
         })
       : null;
+
+    if (supabaseClient) {
+      // Keep the account controls current after returning from the email confirmation link.
+      supabaseClient.auth.onAuthStateChange((event, session) => {
+        if (!session?.user) return;
+        currentSupabaseUser = session.user;
+        supabaseUserId = session.user.id;
+        updateAccountButton();
+        if (event === 'USER_UPDATED' && session.user.email_confirmed_at) {
+          setAccountStatus('Email verified. Set a password so you can sign in on another device.');
+        }
+      });
+    }
 
     function setSyncStatus(message, tone = 'neutral') {
       const label = document.getElementById('supabaseSyncStatus');
@@ -567,6 +610,83 @@
       label.lastChild.textContent = ` ${message}`;
       label.classList.remove('text-slate-500', 'text-emerald-700', 'text-rose-700', 'text-amber-700');
       label.classList.add(tone === 'ok' ? 'text-emerald-700' : tone === 'error' ? 'text-rose-700' : tone === 'neutral' ? 'text-slate-500' : 'text-amber-700');
+    }
+
+    function updateAccountButton() {
+      const button = document.getElementById('accountSyncBtn');
+      if (!button) return;
+      button.textContent = !currentSupabaseUser
+        ? 'Sign in'
+        : currentSupabaseUser.is_anonymous
+          ? 'Link account'
+          : 'Account linked';
+    }
+
+    function setAccountStatus(message, isError = false) {
+      const status = document.getElementById('accountStatus');
+      status.textContent = message;
+      status.className = `rounded-lg px-3 py-2 text-xs leading-relaxed ${isError ? 'bg-rose-50 text-rose-700' : 'bg-slate-50 text-slate-600'}`;
+    }
+
+    function resetLocalProgressForAccountSwitch() {
+      state.progress = {};
+      state.questions.forEach(q => {
+        try { localStorage.removeItem(`sat-practice-note:${q.id}`); } catch (_) {}
+        initQuestionProgress(q.id);
+      });
+      saveProgressCache();
+    }
+
+    async function loadProgressForUser(userId) {
+      const { data: progressRows, error } = await supabaseClient
+        .from('sat_progress').select('*').order('updated_at', { ascending: false }).limit(1000);
+      if (error) {
+        console.warn('Supabase progress load failed:', error.message);
+        setSyncStatus('Question bank loaded; check progress-table policies', 'error');
+        return { error, remoteIds: new Set() };
+      }
+      const remoteIds = new Set();
+      for (const row of progressRows) {
+        remoteIds.add(row.question_id);
+        state.progress[row.question_id] = {
+          attempts: row.attempts || [], selectedChoice: row.selected_choice || null,
+          status: row.status || 'unanswered', elapsedSeconds: row.elapsed_seconds || 0,
+          markedForReview: Boolean(row.marked_for_review), eliminatedChoices: row.eliminated_choices || [],
+          note: row.note ?? readSavedQuestionNote(row.question_id)
+        };
+      }
+      saveProgressCache();
+      return { error: null, remoteIds };
+    }
+
+    async function activateSupabaseUser(user, migrateLocalProgress = false) {
+      const previousUserId = (() => {
+        try { return localStorage.getItem('sat-practice-user-id'); } catch (_) { return null; }
+      })();
+      const isDifferentAccount = Boolean(previousUserId && previousUserId !== user.id);
+      if (isDifferentAccount) resetLocalProgressForAccountSwitch();
+
+      currentSupabaseUser = user;
+      supabaseUserId = user.id;
+      try { localStorage.setItem('sat-practice-user-id', user.id); } catch (_) {}
+      updateAccountButton();
+
+      const { error, remoteIds } = await loadProgressForUser(user.id);
+      if (error) return;
+
+      // Migrate progress left in this browser by the older local-only version.
+      if (migrateLocalProgress && !isDifferentAccount) {
+        for (const q of SAT_QUESTIONS) {
+          const progress = state.progress[q.id];
+          const hasLocalWork = progress && (
+            progress.attempts.length || progress.selectedChoice || progress.status !== 'unanswered' ||
+            progress.elapsedSeconds || progress.markedForReview || progress.eliminatedChoices.length || progress.note
+          );
+          if (hasLocalWork && !remoteIds.has(q.id)) await saveProgressToSupabase(q.id);
+        }
+      }
+      setSyncStatus('Synced to Supabase', 'ok');
+      renderCurrentQuestion();
     }
 
     function saveProgressCache() {
@@ -627,7 +747,7 @@
         }
         session = data.session;
       }
-      supabaseUserId = session.user.id;
+      await activateSupabaseUser(session.user, true);
 
       const { data: bankRows, error: bankError } = await supabaseClient
         .from('sat_questions')
@@ -646,23 +766,8 @@
         setSyncStatus(`Supabase bank has ${bankRows.length} of ${SAT_QUESTIONS.length} questions`, 'pending');
       }
 
-      const { data: progressRows, error: progressError } = await supabaseClient
-        .from('sat_progress').select('*').order('updated_at', { ascending: false }).limit(1000);
-      if (progressError) {
-        setSyncStatus('Question bank loaded; check progress-table policies', 'error');
-        console.warn('Supabase progress load failed:', progressError.message);
-      } else {
-        for (const row of progressRows) {
-          state.progress[row.question_id] = {
-            attempts: row.attempts || [], selectedChoice: row.selected_choice || null,
-            status: row.status || 'unanswered', elapsedSeconds: row.elapsed_seconds || 0,
-            markedForReview: Boolean(row.marked_for_review), eliminatedChoices: row.eliminated_choices || [],
-            note: row.note ?? readSavedQuestionNote(row.question_id)
-          };
-        }
-        saveProgressCache();
-        setSyncStatus('Synced to Supabase', 'ok');
-      }
+      await loadProgressForUser(session.user.id);
+      setSyncStatus('Synced to Supabase', 'ok');
       renderCurrentQuestion();
     }
 
@@ -1182,6 +1287,111 @@
       prog.markedForReview = !prog.markedForReview;
       scheduleProgressSave(q.id);
       renderCurrentQuestion();
+    });
+
+    const accountModal = document.getElementById('accountModal');
+    const accountEmailInput = document.getElementById('accountEmailInput');
+    const accountPasswordInput = document.getElementById('accountPasswordInput');
+    const linkAccountBtn = document.getElementById('linkAccountBtn');
+    const setAccountPasswordBtn = document.getElementById('setAccountPasswordBtn');
+    const signInAccountBtn = document.getElementById('signInAccountBtn');
+
+    function openAccountModal() {
+      accountEmailInput.value = currentSupabaseUser?.email || '';
+      accountPasswordInput.value = '';
+      linkAccountBtn.classList.toggle('hidden', !currentSupabaseUser || !currentSupabaseUser.is_anonymous);
+      setAccountPasswordBtn.classList.toggle('hidden', !currentSupabaseUser || currentSupabaseUser.is_anonymous);
+      accountModal.classList.remove('hidden');
+      if (currentSupabaseUser?.is_anonymous) {
+        setAccountStatus('Link an email to this temporary account first. Your current progress remains attached to this account.');
+      } else if (currentSupabaseUser) {
+        setAccountStatus(`Signed in${currentSupabaseUser.email ? ` as ${currentSupabaseUser.email}` : ''}. Use the same email and password on your other device.`);
+      } else {
+        setAccountStatus('Sign in with the same email and password used on your other device.');
+      }
+    }
+
+    document.getElementById('accountSyncBtn').addEventListener('click', openAccountModal);
+    document.getElementById('closeAccountModalBtn').addEventListener('click', () => accountModal.classList.add('hidden'));
+    accountModal.addEventListener('click', event => {
+      if (event.target === accountModal) accountModal.classList.add('hidden');
+    });
+
+    linkAccountBtn.addEventListener('click', async () => {
+      const email = accountEmailInput.value.trim();
+      if (!supabaseClient || !currentSupabaseUser?.is_anonymous) {
+        setAccountStatus('This browser does not have an anonymous session to link. Check that Supabase sync is connected.', true);
+        return;
+      }
+      if (!email || !accountEmailInput.checkValidity()) {
+        setAccountStatus('Enter a valid email address.', true);
+        accountEmailInput.focus();
+        return;
+      }
+      if (window.location.protocol === 'file:') {
+        setAccountStatus('Open the app from its HTTPS site first. Supabase must redirect the email verification back to the app.', true);
+        return;
+      }
+      const emailRedirectTo = `${window.location.origin}${window.location.pathname}`;
+      setAccountStatus('Sending a verification email...');
+      const { error } = await supabaseClient.auth.updateUser(
+        { email },
+        { emailRedirectTo }
+      );
+      if (error) {
+        console.warn('Supabase account linking failed:', error.message);
+        setAccountStatus(`${error.message} If needed, enable Manual Linking in Supabase Auth settings and allow this site's URL under URL Configuration.`, true);
+      } else {
+        setAccountStatus('Check that email and confirm the link. It will return to this app; then set a password here.');
+      }
+    });
+
+    setAccountPasswordBtn.addEventListener('click', async () => {
+      const password = accountPasswordInput.value;
+      if (!currentSupabaseUser || currentSupabaseUser.is_anonymous) {
+        setAccountStatus('Link and verify your email before setting a password.', true);
+        return;
+      }
+      if (!currentSupabaseUser.email_confirmed_at) {
+        setAccountStatus('Confirm the email link first, then return here to set your password.', true);
+        return;
+      }
+      if (password.length < 8) {
+        setAccountStatus('Choose a password with at least 8 characters.', true);
+        accountPasswordInput.focus();
+        return;
+      }
+      const { data, error } = await supabaseClient.auth.updateUser({ password });
+      if (error) {
+        setAccountStatus(error.message, true);
+      } else {
+        currentSupabaseUser = data.user;
+        updateAccountButton();
+        accountPasswordInput.value = '';
+        setAccountStatus('Password set. On another device, sign in with this email and password.');
+      }
+    });
+
+    signInAccountBtn.addEventListener('click', async () => {
+      const email = accountEmailInput.value.trim();
+      const password = accountPasswordInput.value;
+      if (!email || !accountEmailInput.checkValidity() || !password) {
+        setAccountStatus('Enter the account email and password.', true);
+        return;
+      }
+      signInAccountBtn.disabled = true;
+      signInAccountBtn.textContent = 'Signing in...';
+      const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+      signInAccountBtn.disabled = false;
+      signInAccountBtn.textContent = 'Sign in';
+      if (error) {
+        setAccountStatus(error.message, true);
+        return;
+      }
+      accountPasswordInput.value = '';
+      await activateSupabaseUser(data.user, false);
+      updateAccountButton();
+      setAccountStatus('Signed in. This device is now using the same Supabase progress.');
     });
 
     document.getElementById('submitAnswerBtn').addEventListener('click', submitSelectedAnswer);
