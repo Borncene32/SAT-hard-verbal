@@ -394,8 +394,8 @@
         <select id="statusFilterSelect" class="text-xs font-medium border border-slate-300 rounded-lg px-2.5 py-1.5 bg-slate-50 text-slate-700 focus:outline-none focus:border-blue-600">
           <option value="ALL">All Statuses</option>
           <option value="UNANSWERED">Unanswered</option>
-          <option value="CORRECT">Solved Correctly</option>
-          <option value="FAILED">Missed (3 Strikes)</option>
+          <option value="CORRECT">Correct on 1st try</option>
+          <option value="FAILED">Missed (not correct on 1st try)</option>
           <option value="REVIEW">Marked for Review</option>
         </select>
         <input id="searchQuestionInput" type="text" placeholder="Search ID or keyword..." class="text-xs border border-slate-300 rounded-lg px-3 py-1.5 flex-1 min-w-[140px] focus:outline-none focus:border-blue-600" />
@@ -406,7 +406,7 @@
         <span class="inline-flex items-center gap-1.5"><span class="w-3.5 h-3.5 rounded border-2 border-dashed border-slate-800 inline-block"></span> Current</span>
         <span class="inline-flex items-center gap-1.5"><span class="w-3.5 h-3.5 rounded border border-dashed border-slate-400 bg-white inline-block"></span> Unanswered</span>
         <span class="inline-flex items-center gap-1.5"><span class="w-3.5 h-3.5 rounded bg-emerald-600 inline-block"></span> Correct</span>
-        <span class="inline-flex items-center gap-1.5"><span class="w-3.5 h-3.5 rounded bg-rose-600 inline-block"></span> Missed (3/3)</span>
+        <span class="inline-flex items-center gap-1.5"><span class="w-3.5 h-3.5 rounded bg-rose-600 inline-block"></span> Missed (not correct on 1st try)</span>
         <span class="inline-flex items-center gap-1.5"><span class="w-3.5 h-3.5 rounded bg-amber-400 inline-block"></span> In Progress</span>
         <span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 bg-rose-600 inline-block [clip-path:polygon(0_0,100%_0,100%_100%,50%_75%,0_100%)]"></span> For Review</span>
       </div>
@@ -782,6 +782,14 @@
 
     function isQuestionResolved(prog) {
       return prog.status === 'correct' || prog.status === 'failed';
+    }
+
+    function isCorrectOnFirstTry(question, prog) {
+      return prog.status === 'correct' && prog.attempts.length === 1 && prog.attempts[0] === question.correct;
+    }
+
+    function isResolvedMiss(question, prog) {
+      return prog.status === 'failed' || (prog.status === 'correct' && !isCorrectOnFirstTry(question, prog));
     }
 
     function updateTimerUI() {
@@ -1198,8 +1206,8 @@
 
       state.questions.forEach(q => {
         const p = initQuestionProgress(q.id);
-        if (p.status === 'correct') solvedCount++;
-        else if (p.status === 'failed') failedCount++;
+        if (isCorrectOnFirstTry(q, p)) solvedCount++;
+        else if (isResolvedMiss(q, p)) failedCount++;
         else if (p.status === 'in-progress') inProgCount++;
         else unansCount++;
       });
@@ -1215,17 +1223,17 @@
         // Apply filters
         if (domainFilter !== 'ALL' && q.domain !== domainFilter) return;
         if (statusFilter === 'UNANSWERED' && prog.status !== 'unanswered') return;
-        if (statusFilter === 'CORRECT' && prog.status !== 'correct') return;
-        if (statusFilter === 'FAILED' && prog.status !== 'failed') return;
+        if (statusFilter === 'CORRECT' && !isCorrectOnFirstTry(q, prog)) return;
+        if (statusFilter === 'FAILED' && !isResolvedMiss(q, prog)) return;
         if (statusFilter === 'REVIEW' && !prog.markedForReview) return;
         if (searchQuery && !q.id.toLowerCase().includes(searchQuery) && !q.passage.toLowerCase().includes(searchQuery) && !q.question.toLowerCase().includes(searchQuery)) return;
 
         const isCurrent = idx === state.currentIndex;
         let tileClasses = 'relative h-10 rounded-lg font-bold text-xs flex items-center justify-center transition transform hover:scale-105 ';
 
-        if (prog.status === 'correct') {
+        if (isCorrectOnFirstTry(q, prog)) {
           tileClasses += 'bg-emerald-600 text-white shadow-sm ';
-        } else if (prog.status === 'failed') {
+        } else if (isResolvedMiss(q, prog)) {
           tileClasses += 'bg-rose-600 text-white shadow-sm ';
         } else if (prog.status === 'in-progress') {
           tileClasses += 'bg-amber-400 text-slate-950 shadow-sm ';
